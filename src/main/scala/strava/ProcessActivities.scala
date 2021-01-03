@@ -42,7 +42,7 @@ object ProcessActivities extends IOApp {
           |Run mileage (${runs.size}): ${totalMiles(runs)}
           | - Deduped run mileage (${dedupedRuns.size}): ${totalMiles(dedupedRuns)}
           |
-          |Total ride mileage (${zwiftRides.size + rides.size}): ${totalMiles(zwiftRides) + totalMiles(rides)}
+          |Total ride mileage (${zwiftRides.size + rides.size}): ${totalMiles(zwiftRides ++ rides)}
           | - Zwift mileage (${zwiftRides.size}): ${totalMiles(zwiftRides)}
           | - Peloton mileage (${pelotonRides.size}): ${totalMiles(pelotonRides)}
           | - Outdoor ride mileage (${outdoorRides.size}): ${totalMiles(outdoorRides)}
