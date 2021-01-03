@@ -12,12 +12,12 @@ Hence, all we have to do is make a few calls to `/athlete/activities`, implement
 
 # Application Architecture
 
-We'll implement two console applications -- one that fetches activities for a specified year and writes them to local storage and another that reads the stored activities, de-duplicates them, and summarizes them. We could do this as a single application but I have found it useful to fetch the data once and then iterate on the processing logic without authentication and waiting for activity retrieval. This also allows REPL-based experimentation of the fetched data.
+We'll implement two console applications -- one that fetches activities for a specified year and writes them to local storage and another that reads the stored activities, de-duplicates them, and summarizes them. We could do this as a single application but I have found it useful to fetch the data once and then iterate on the processing logic without authentication and without waiting for activity retrieval. This also allows REPL-based experimentation with the fetched data.
 
 # Authentication
 
 One complication is that Strava uses [OAuth2 for authentication](http://developers.strava.com/docs/authentication/). The linked authentication documentation gets in to all the details, but in summary:
-- we register our application with Strava, which gives us a "client id" and "client secret"
+- we register our application with Strava, which gives us a client id and client secret
 - we implement a bearer token retrieval scheme which:
   - launches a web browser to the Strava website, where the user logs in to Strava and grants our application access to read their activities
   - as a result of the user granting access, a single-use authorization code is provided to our application
