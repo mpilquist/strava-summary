@@ -20,5 +20,7 @@ One complication is that Strava uses [OAuth2 for authentication](http://develope
   - launches a web browser to the Strava website, where the user logs in to Strava and grants our application access to read their activities
   - as a result of the user granting access, a single-use authentication code is provided to our application
   - using the authentication code, the application fetches an access token
-The access token is then used in all Strava API requests. For those with OAuth 2 experience, there's no need to implement token renewal as Strava's access tokens are valid for 6 hours -- we're building a command line app which will terminate in a few seconds.
+  - the access token is then used in all Strava API requests
+
+For those with OAuth 2 experience, there's no need to implement token renewal as Strava's access tokens are valid for 6 hours -- we're building a command line app which will terminate in a few seconds.
 
