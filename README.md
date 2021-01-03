@@ -10,7 +10,7 @@ Hence, all we have to do is make a few calls to `/athlete/activities`, implement
 
 # Application Architecture
 
-We'll implement two console applications -- one that fetches activities for a specified year and writes them to local storage and another that reads the stored activities, de-duplicates them, and summarizes them. We could do this as a single application instead but I've found it's useful to fetch the data once and then iterate on the processing logic without authentication and waiting for activity retrieval.
+We'll implement two console applications -- one that fetches activities for a specified year and writes them to local storage and another that reads the stored activities, de-duplicates them, and summarizes them. We could do this as a single application but I have found it useful to fetch the data once and then iterate on the processing logic without authentication and waiting for activity retrieval. This also allows REPL-based experimentation of the fetched data.
 
 # Authentication
 
@@ -162,6 +162,8 @@ object FetchActivities extends IOApp with Http4sClientDsl[IO] {
 
 This application uses the `fetchActivitiesForYearJson` method, which is implemented via the `fetchActivitiesJson` method we wrote above. Given the relatively small number of activities, we chose to accumulate all activities in to a single `Vector[Json]` via `.compile.toVector` before writing them to storage. We could have handled this in a streaming fashion instead by using [`circe-fs2`](https://github.com/circe/circe-fs2) and a streaming JSON file format.
 
+There's no validation or error handling of the command line arguments -- for a production grade application, we could use the [Decline](https://github.com/bkirwi/decline) library.
+
 Take note of the way the global resources, the `Blocker` and `Client[IO]` are instantiated in `run` as `cats.effect.Resource[IO, *]` values and then used (via `.use(r => ...)`), ensuring cleanup.
 
 # Processing Activities
@@ -276,3 +278,10 @@ object ProcessActivities extends IOApp {
 
 # Summary
 
+Success! We accomplished our goal with a small amount of code.
+
+Most of the complexity in this project was in the OAuth exchange. I'd love to see an OAuth2 http4s library that simplifies this kind of stuff.
+
+We used cats-effect 2 for this project since http4s is not yet available for cats-effect 3. Much of the code cruft (e.g. `Blocker` and `ContextShift[IO]`) is gone in cats-effect 3.
+
+By structuring the project as two applications, we were able to experiment with the data set in the REPL and iterate quickly on our processing logic. I find this style of "small data science" very effective and very applicable. No need for Spark or worksheets when you have small data sets and powerful libraries.
