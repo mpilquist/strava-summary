@@ -18,34 +18,39 @@ One complication is that Strava uses [OAuth2 for authentication](http://develope
 - we register our application with Strava, which gives us a "client id" and "client secret"
 - we implement a bearer token retrieval scheme which:
   - launches a web browser to the Strava website, where the user logs in to Strava and grants our application access to read their activities
-  - as a result of the user granting access, a single-use authentication code is provided to our application
-  - using the authentication code, the application fetches an access token
+  - as a result of the user granting access, a single-use authorization code is provided to our application
+  - using the authorization code, the application fetches an access token
   - the access token is then used in all Strava API requests
 
 For those with OAuth 2 experience, there's no need to implement token renewal as Strava's access tokens are valid for 6 hours -- we're building a command line app which will terminate in a few seconds.
 
-After the user grants access to our application, the Strava website redirects the user's browser to a URL of our choosing, providing the needed authentication code. Hence, we'll need to start an HTTP server in order for the redirect to have a target. After starting the HTTP server, we'll open a browser and ask the user to grant access. Once Strava redirects back to our application, we can extract the authentication code and tear down the HTTP server. Here's how we can implement this:
+After the user grants access to our application, the Strava website redirects the user's browser to a URL of our choosing, providing the needed authorization code. Hence, we'll need to start an HTTP server in order for the redirect to have a target. After starting the HTTP server, we'll open a browser and ask the user to grant access. Once Strava redirects back to our application, we can extract the authorization code and tear down the HTTP server. Here's how we can implement this:
 
 ```scala
-def getAuthorizationCode(blocker: Blocker, clientId: ClientId): IO[String] = {
-  Deferred[IO, String].flatMap { deferredAuthCode =>
+def getAuthorizationCode(blocker: Blocker, clientId: ClientId): IO[AuthorizationCode] = {
+  Deferred[IO, AuthorizationCode].flatMap { deferredAuthCode =>
     BlazeServerBuilder[IO](global)
       .bindHttp(port = 0)
       .withHttpApp { 
         object CodeParam extends QueryParamDecoderMatcher[String]("code")
         HttpRoutes.of[IO] {
           case GET -> Root / "exchange_token" :? CodeParam(code) =>
-            deferredAuthCode.complete(code).as(Response(Status.Ok))
+            deferredAuthCode.complete(AuthorizationCode(code)).as(Response(Status.Ok))
         }.orNotFound
       }
       .stream.flatMap { server =>
         val port = server.address.getPort
-        println("Bound port " + port)
         Stream.eval(requestAuthCode(blocker, clientId, port) *> deferredAuthCode.get)
       }.compile.lastOrError
   }
 }
+```
 
+We first create a `Deferred[IO, AuthorizationCode]`, which will eventually be completed with the code provided by Strava. We then start an http4s server with a route that handles the `/exchange_token?code=${authorizationCode}` redirect by completing the `Deferred[IO, AuthorizationCode]`. To avoid a port conflict, we bind the server to port 0, which causes the operating system to pick an unused ephemeral port number. We query for the selected port number and use it in the subsequent redirect URI generation. Finally, we open a browser to Strava and then wait for the deferred authorization code to be completed. This is all expressed as an `fs2.Stream` which is compiled to a value of `IO[AuthorizationCode]` via `.compile.lastOrError`. As a result, when the `AuthorizationCode` is returned, the web server is shut down as part of stream finalization.
+
+Opening a browser is accomplished via the `open` utility:
+
+```scala
 def requestAuthCode(blocker: Blocker, clientId: ClientId, localPort: Int): IO[Unit] = {
   blocker.delay[IO, Unit] {
     import scala.sys.process._
@@ -54,3 +59,36 @@ def requestAuthCode(blocker: Blocker, clientId: ClientId, localPort: Int): IO[Un
 }
 ```
 
+Here we've used `scala.sys.process` to shell out to `open` but for more complicated interaction with processes, check out the [prox](https://vigoo.github.io/prox/) library. Because `scala.sys.process` blocks for the process to complete, we wrap its execution with `blocker.delay` to ensure the blocking does not occur on our main compute pool. (Note: in the forthcoming cats-effect 3, `Blocker` is gone and the equivalent is `IO.blocking { s"open http://...".! }`).
+
+Alright, now that we have an authorization code, we can fetch a bearer token:
+
+```scala
+def fetchBearerToken(client: Client[IO], clientId: ClientId, clientSecret: ClientSecret, authorizationCode: AuthorizationCode): IO[BearerToken] = {
+  val request = Method.POST(
+    UrlForm(
+      "client_id" -> clientId.value,
+      "client_secret" -> clientSecret.value,
+      "code" -> authorizationCode.value,
+      "grant_type" -> "authorization_code"),
+    Uri.uri("https://www.strava.com/oauth/token"))
+  client.expect(request)(jsonOf[IO, BearerToken])
+}
+```
+
+This is straightforward usage of the http4s client API, though it relies on the client DSL (`Http4sClientDsl[IO]`) being mixed in to the containing type. The `Client[IO]` parameter is a value created at startup and used to make all client HTTP requests. The `clientId` and `clientSecret` parameters are values we obtained as a result of registering our application with Strava. We pass these as parameters to avoid putting any secrets in the code -- for this app, we get them from command line arguments but in a production grade application, we'd fetch these from [Vault](https://www.vaultproject.io) or some other secret storage system.
+
+Putting these pieces together gives us the overall authentication workflow:
+
+```scala
+def getBearerToken(blocker: Blocker, client: Client[IO], clientId: ClientId, clientSecret: ClientSecret): IO[BearerToken] =
+  getAuthorizationCode(blocker, clientId).flatMap(fetchBearerToken(client, clientId, clientSecret, _))
+```
+
+# Fetching Activities
+
+# Activity Storage
+
+# Processing Activities
+
+# Summary

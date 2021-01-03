@@ -47,20 +47,19 @@ object FetchActivities extends IOApp with Http4sClientDsl[IO] {
     getAuthorizationCode(blocker, clientId).flatMap(fetchBearerToken(client, clientId, clientSecret, _))
   }
 
-  def getAuthorizationCode(blocker: Blocker, clientId: ClientId): IO[String] = {
-    Deferred[IO, String].flatMap { deferredAuthCode =>
+  def getAuthorizationCode(blocker: Blocker, clientId: ClientId): IO[AuthorizationCode] = {
+    Deferred[IO, AuthorizationCode].flatMap { deferredAuthCode =>
       BlazeServerBuilder[IO](global)
         .bindHttp(port = 0)
         .withHttpApp { 
           object CodeParam extends QueryParamDecoderMatcher[String]("code")
           HttpRoutes.of[IO] {
             case GET -> Root / "exchange_token" :? CodeParam(code) =>
-              deferredAuthCode.complete(code).as(Response(Status.Ok))
+              deferredAuthCode.complete(AuthorizationCode(code)).as(Response(Status.Ok))
           }.orNotFound
         }
         .stream.flatMap { server =>
           val port = server.address.getPort
-          println("Bound port " + port)
           Stream.eval(requestAuthCode(blocker, clientId, port) *> deferredAuthCode.get)
         }.compile.lastOrError
     }
@@ -73,15 +72,15 @@ object FetchActivities extends IOApp with Http4sClientDsl[IO] {
     }
   }
 
-  def fetchBearerToken(client: Client[IO], clientId: ClientId, clientSecret: ClientSecret, authorizationCode: String): IO[BearerToken] = {
+  def fetchBearerToken(client: Client[IO], clientId: ClientId, clientSecret: ClientSecret, authorizationCode: AuthorizationCode): IO[BearerToken] = {
     val request = Method.POST(
       UrlForm(
         "client_id" -> clientId.value,
         "client_secret" -> clientSecret.value,
-        "code" -> authorizationCode,
+        "code" -> authorizationCode.value,
         "grant_type" -> "authorization_code"),
-       Uri.uri("https://www.strava.com/oauth/token"))
-       client.expect(request)(jsonOf[IO, BearerToken])
+      Uri.uri("https://www.strava.com/oauth/token"))
+    client.expect(request)(jsonOf[IO, BearerToken])
   }
 
   def fetchActivitiesForYearJson(client: Client[IO], bearerToken: BearerToken, year: Year): Stream[IO, Json] = {
