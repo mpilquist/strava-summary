@@ -24,7 +24,7 @@ import java.time.{LocalDate, Year, ZonedDateTime, ZoneId}
 
 object FetchActivities extends IOApp with Http4sClientDsl[IO] {
   def run(args: List[String]): IO[ExitCode] = {
-    if (args.size != 2) {
+    if (args.size != 3) {
       IO(Console.err.println("Syntax: FetchActivities <client id> <client secret> <year to fetch>")).as(ExitCode.Error)
     } else {
       val clientId = ClientId(args.head)
