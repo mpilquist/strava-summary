@@ -22,8 +22,7 @@ object ProcessActivities extends IOApp {
     while (remaining.nonEmpty) {
       val head = remaining.head
       val dupes = remaining.filter(_.overlaps(head))
-      val max = dupes.tail.foldLeft(dupes.head)((max, dup) => if (dup.distance > max.distance) dup else max)
-      bldr += max
+      bldr += head
       remaining --= dupes
     }
     bldr.result()

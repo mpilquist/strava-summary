@@ -166,4 +166,113 @@ Take note of the way the global resources, the `Blocker` and `Client[IO]` are in
 
 # Processing Activities
 
+The processing application is much simpler. We need to read & decode the stored activities and then run our various computations on the result.
+
+Let's start with reading & decoding:
+
+```scala
+def readActivities(blocker: Blocker)(implicit cs: ContextShift[IO]): IO[Vector[Activity]] =
+  file.readAll[IO](path, blocker, 4096).through(text.utf8Decode)
+    .compile.string
+    .flatMap { str =>
+      parse(str).flatMap(_.as[Vector[Activity]]) match {
+        case Left(err) => IO.raiseError(err)
+        case Right(activities) => IO.pure(activities)
+      }
+  }
+```
+
+We use `fs2.io.file` again, this time reading the full contents of the file, decoding as UTF8. We accumulate the decoded results in to a single value of `IO[String]` via `.compile.string`. Then we parse that string to a `Json` value and then decode that value as a `Vector[Activity]`.
+
+Next, we need to compute various metrics on the `Vector[Activity]`. These metrics are all straightforward usage of the Scala collection API. For example, computing the total mileage of a `Vector[Activity]` and rendering as a friendly string:
+
+```scala
+def totalMiles(activities: Vector[Activity]): String =
+  f"${metersToMiles(activities.foldLeft(0.0d)(_ + _.distance))}%.2f mi"
+
+def metersToMiles(meters: Double): Double = meters * 0.000621371
+```
+
+Each activity has a `type` field indicating whether it is a ride, run, etc. We can use this field and some others to compute interesting breakouts:
+
+```scala
+val runs = activities.filter(_.tpe == "Run")
+val zwiftRides = activities.filter(_.tpe == "VirtualRide")
+val rides = activities.filter(_.tpe == "Ride")
+val pelotonRides = rides.filter(_.trainer)
+val outdoorRides = rides.filterNot(_.trainer)
+```
+
+The de-duplication logic is a bit more complicated:
+
+```scala
+def dedupe(activities: Vector[Activity]): Vector[Activity] = {
+  val remaining = collection.mutable.SortedSet(activities: _*)(
+    Ordering.by((a: Activity) => (-a.distance, a.startDate.toEpochMilli, a.name))
+  )
+  val bldr = Vector.newBuilder[Activity]
+  while (remaining.nonEmpty) {
+    val head = remaining.head
+    val dupes = remaining.filter(_.overlaps(head))
+    bldr += head
+    remaining --= dupes
+  }
+  bldr.result()
+}
+```
+
+We sort the activities so the longest activity is first and the shortest activity is last. We then take the longest activity, discard any other activities which overlap with it, and repeat. We continue the iteration until there are no remaining activities.
+
+Hence, the full processing application is:
+
+```scala
+object ProcessActivities extends IOApp {
+  def run(args: List[String]): IO[ExitCode] = {
+    Blocker[IO].use { blocker =>
+      ActivityStorage.readActivities(blocker).flatMap(summarizeActivities)
+    }.as(ExitCode.Success)
+  }
+
+  def totalMiles(activities: Vector[Activity]): String =
+    f"${metersToMiles(activities.foldLeft(0.0d)(_ + _.distance))}%.2f mi"
+
+  def metersToMiles(meters: Double): Double = meters * 0.000621371
+
+  def dedupe(activities: Vector[Activity]): Vector[Activity] = {
+    val remaining = collection.mutable.SortedSet(activities: _*)(
+      Ordering.by((a: Activity) => (-a.distance, a.startDate.toEpochMilli, a.name))
+    )
+    val bldr = Vector.newBuilder[Activity]
+    while (remaining.nonEmpty) {
+      val head = remaining.head
+      val dupes = remaining.filter(_.overlaps(head))
+      bldr += head
+      remaining --= dupes
+    }
+    bldr.result()
+  }
+
+  def summarizeActivities(activities: Vector[Activity]): IO[Unit] = {
+    val runs = activities.filter(_.tpe == "Run")
+    val dedupedRuns = dedupe(runs)
+    val zwiftRides = activities.filter(_.tpe == "VirtualRide")
+    val rides = activities.filter(_.tpe == "Ride")
+    val pelotonRides = rides.filter(_.trainer)
+    val outdoorRides = rides.filterNot(_.trainer)
+    IO(println(
+      s"""|Loaded ${activities.size} activities
+          |
+          |Run mileage (${runs.size}): ${totalMiles(runs)}
+          | - Deduped run mileage (${dedupedRuns.size}): ${totalMiles(dedupedRuns)}
+          |
+          |Total ride mileage (${zwiftRides.size + rides.size}): ${totalMiles(zwiftRides ++ rides)}
+          | - Zwift mileage (${zwiftRides.size}): ${totalMiles(zwiftRides)}
+          | - Peloton mileage (${pelotonRides.size}): ${totalMiles(pelotonRides)}
+          | - Outdoor ride mileage (${outdoorRides.size}): ${totalMiles(outdoorRides)}
+          """.stripMargin))
+  }
+}
+```
+
 # Summary
+

@@ -22,14 +22,13 @@ object ActivityStorage {
       ))).compile.drain
   }
 
-  def readActivities(blocker: Blocker)(implicit cs: ContextShift[IO]): IO[Vector[Activity]] = {
+  def readActivities(blocker: Blocker)(implicit cs: ContextShift[IO]): IO[Vector[Activity]] =
     file.readAll[IO](path, blocker, 4096).through(text.utf8Decode)
       .compile.string
       .flatMap { str =>
         parse(str).flatMap(_.as[Vector[Activity]]) match {
-          case Left(err) => ???
+          case Left(err) => IO.raiseError(err)
           case Right(activities) => IO.pure(activities)
         }
     }
-  }
 }
