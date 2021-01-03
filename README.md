@@ -87,7 +87,82 @@ def getBearerToken(blocker: Blocker, client: Client[IO], clientId: ClientId, cli
 
 # Fetching Activities
 
+Now that we have a bearer token, we can fetch activities via `GET /athlete/activities`. The only complication we need to handle is pagination. Each request takes a `page=${n}` query parameter, starting with 1. The API docs instruct us to increment the page number until we receive a response with no activities.
+
+This is a common pattern when considering how streams of elements are constructed -- there's an initial state, the page number, and an effectful action which generates both the stream elements (activities) and the next state (page number + 1). The `fs2.Stream` object expresses this pattern via the `unfoldLoopEval` constructor:
+
+```scala
+def unfoldLoopEval[F[_], S, O](s: S)(f: S => F[(O, Option[S])]): Stream[F, O]
+```
+
+We'll use this with `F = IO`, `S = Int` (page number), and `O = Vector[Json]` (page of activities). Each invocation of `f` produces another page of elements and then either the next page number (wrapped in `Some`) or `None`, indicating there are no more pages to fetch.
+
+```scala
+def fetchActivitiesJson(client: Client[IO], bearerToken: BearerToken, after: ZonedDateTime, before: ZonedDateTime, page: Int = 1): Stream[IO, Json] = {
+  Stream.unfoldLoopEval(1) { page =>
+    val request = Method.GET(
+      Uri.unsafeFromString(s"https://www.strava.com/api/v3/athlete/activities?after=${after.toEpochSecond}&before=${before.toEpochSecond}&page=${page}&per_page=200"),
+        Accept(MediaType.application.json),
+        Authorization(Credentials.Token(AuthScheme.Bearer, bearerToken.accessToken))
+    )
+    client.expect(request)(jsonOf[IO, Vector[Json]]).map { activities =>
+      val nextPage = if (activities.nonEmpty) Some(page + 1) else None
+      (activities, nextPage)
+    }
+  }.flatMap(activities => Stream.chunk(Chunk.vector(activities)))
+}
+```
+
+We decoded each page with Circe to a `Vector[Json]`, which may seem odd -- why not fully decode the activities as a `Vector[Activity]` or do no decoding and return a single `Json`? Our goal is to just write these values out to storage so decoding to an `Activity` just to later re-encode to `Json` is unnecessary. If we did no decoding and returned a single `Json` value for the entire page, we would not be able to emit individual activities and hide pagination from the caller.
+
+Note `unfoldLoopEval` gives us a `Stream[IO, Vector[Json]]` and we want a `Stream[IO, Json]` -- we accomplish that by flat mapping the result of `unfoldLoopEval` and turning each page of activities in to a stream of individual activities.
+
 # Activity Storage
+
+This application needs simple local storage for the activities list. Since we can fit all activities in to memory and don't need any query abilities, we'll just store the full list of activities as json to a local file using the `fs2.io.file` package.
+
+```scala
+private val path = Paths.get("activities.json")
+
+def writeActivitiesJson(blocker: Blocker, activities: Vector[Json])(implicit cs: ContextShift[IO]): IO[Unit] = {
+  val asString = Json.fromValues(activities).spaces2
+  Stream.emit(asString)
+    .through(text.utf8Encode)
+    .through(file.writeAll[IO](path, blocker, flags = List(
+      StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING
+    ))).compile.drain
+}
+```
+
+Wiring everything together gives us this application:
+
+```scala
+object FetchActivities extends IOApp with Http4sClientDsl[IO] {
+  def run(args: List[String]): IO[ExitCode] = {
+    if (args.size != 3) {
+      IO(Console.err.println("Syntax: FetchActivities <client id> <client secret> <year to fetch>")).as(ExitCode.Error)
+    } else {
+      val clientId = ClientId(args.head)
+      val clientSecret = ClientSecret(args.tail.head)
+      val yearToFetch = Year.of(args.tail.tail.head.toInt)
+      Blocker[IO].use { blocker =>
+        BlazeClientBuilder[IO](global).resource.use { client =>
+          getBearerToken(blocker, client, clientId, clientSecret).flatMap { bearerToken =>
+            fetchActivitiesForYearJson(client, bearerToken, yearToFetch)
+              .compile.toVector
+              .flatTap(activities => IO(println(s"Fetched ${activities.size} activities")))
+              .flatMap(ActivityStorage.writeActivitiesJson(blocker, _))
+          }
+        }
+      }.as(ExitCode.Success)
+    }
+  }
+}
+```
+
+This application uses the `fetchActivitiesForYearJson` method, which is implemented via the `fetchActivitiesJson` method we wrote above. Given the relatively small number of activities, we chose to accumulate all activities in to a single `Vector[Json]` via `.compile.toVector` before writing them to storage. We could have handled this in a streaming fashion instead by using [`circe-fs2`](https://github.com/circe/circe-fs2) and a streaming JSON file format.
+
+Take note of the way the global resources, the `Blocker` and `Client[IO]` are instantiated in `run` as `cats.effect.Resource[IO, *]` values and then used (via `.use(r => ...)`), ensuring cleanup.
 
 # Processing Activities
 
