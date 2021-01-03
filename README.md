@@ -1,3 +1,5 @@
+# Small Data Science with Typelevel Libraries
+
 I like to run and bike. Like many other athletes, I use [Strava](https://www.strava.com) for tracking my workouts. When I run outside, I almost always start a Strava run on my watch and a [Peloton](https://www.onepeloton.com) class on my phone (Strava for metrics & GPS, Peloton for instruction and company), resulting in two activites getting logged. In the past, only the Strava run would count towards the annual distance metric but recently, I noticed this changed, with both activities reporting distance. Thankfully, Strava has a [very well documented API](https://developers.strava.com) which allows full access to recorded activities. In this article, we'll look at how to use the Strava API to de-duplicate these runs as well as compute some additional metrics. We'll use a number of [Typelevel](https://typelevel.org) libraries to implement a console application, including [http4s](https://http4s.org), [fs2](https://fs2.io), and [Circe](https://circe.github.io/circe/).
 
 # Overview
