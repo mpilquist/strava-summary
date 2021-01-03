@@ -24,3 +24,33 @@ One complication is that Strava uses [OAuth2 for authentication](http://develope
 
 For those with OAuth 2 experience, there's no need to implement token renewal as Strava's access tokens are valid for 6 hours -- we're building a command line app which will terminate in a few seconds.
 
+After the user grants access to our application, the Strava website redirects the user's browser to a URL of our choosing, providing the needed authentication code. Hence, we'll need to start an HTTP server in order for the redirect to have a target. After starting the HTTP server, we'll open a browser and ask the user to grant access. Once Strava redirects back to our application, we can extract the authentication code and tear down the HTTP server. Here's how we can implement this:
+
+```scala
+def getAuthorizationCode(blocker: Blocker, clientId: ClientId): IO[String] = {
+  Deferred[IO, String].flatMap { deferredAuthCode =>
+    BlazeServerBuilder[IO](global)
+      .bindHttp(port = 0)
+      .withHttpApp { 
+        object CodeParam extends QueryParamDecoderMatcher[String]("code")
+        HttpRoutes.of[IO] {
+          case GET -> Root / "exchange_token" :? CodeParam(code) =>
+            deferredAuthCode.complete(code).as(Response(Status.Ok))
+        }.orNotFound
+      }
+      .stream.flatMap { server =>
+        val port = server.address.getPort
+        println("Bound port " + port)
+        Stream.eval(requestAuthCode(blocker, clientId, port) *> deferredAuthCode.get)
+      }.compile.lastOrError
+  }
+}
+
+def requestAuthCode(blocker: Blocker, clientId: ClientId, localPort: Int): IO[Unit] = {
+  blocker.delay[IO, Unit] {
+    import scala.sys.process._
+    s"open http://www.strava.com/oauth/authorize?client_id=${clientId}&response_type=code&redirect_uri=http://localhost:${localPort}/exchange_token&approval_prompt=force&scope=read,activity:read".!
+  }
+}
+```
+
