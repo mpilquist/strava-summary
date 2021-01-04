@@ -1,6 +1,6 @@
 # Small Data Science with Typelevel Libraries
 
-I like to run and bike. Like many other athletes, I use [Strava](https://www.strava.com) for tracking my workouts. When I run outside, I almost always start a Strava run on my watch and a [Peloton](https://www.onepeloton.com) class on my phone (Strava for metrics & GPS, Peloton for instruction and company), resulting in two activites getting logged. In the past, only the Strava run would count towards the annual distance metric but recently, I noticed this changed, with both activities reporting distance. Thankfully, Strava has a [very well documented API](https://developers.strava.com) which allows full access to recorded activities. In this article, we'll look at how to use the Strava API to de-duplicate these runs as well as compute some additional metrics. We'll use a number of [Typelevel](https://typelevel.org) libraries to implement a console application, including [http4s](https://http4s.org), [fs2](https://fs2.io), and [Circe](https://circe.github.io/circe/).
+I like to run and bike. Like many other athletes, I use [Strava](https://www.strava.com) for tracking my workouts. When I run outside, I almost always start a Strava run on my watch and a [Peloton](https://www.onepeloton.com) class on my phone (Strava for metrics & GPS, Peloton for instruction and company), resulting in two activites getting logged. In the past, only the Strava run would count towards the annual distance metric but recently, I noticed this changed, with both activities reporting distance. Thankfully, Strava has a [very well documented API](https://developers.strava.com) which allows full access to recorded activities. In this article, we'll look at how to use the Strava API to de-duplicate these runs as well as compute some additional metrics. We'll use a number of [Typelevel](https://typelevel.org) libraries to implement a console application, including [http4s](https://http4s.org), [fs2](https://fs2.io), and [Circe](https://circe.github.io/circe/). In particular, we'll use the latest previews of these libraries, built on [cats-effect 3](https://github.com/typelevel/cats-effect/tree/series/3.x).
 
 # Overview
 
@@ -29,21 +29,23 @@ For those with OAuth 2 experience, there's no need to implement token renewal as
 After the user grants access to our application, the Strava website redirects the user's browser to a URL of our choosing, providing the needed authorization code. Hence, we'll need to start an HTTP server in order for the redirect to have a target. After starting the HTTP server, we'll open a browser and ask the user to grant access. Once Strava redirects back to our application, we can extract the authorization code and tear down the HTTP server. Here's how we can implement this:
 
 ```scala
-def getAuthorizationCode(blocker: Blocker, clientId: ClientId): IO[AuthorizationCode] = {
+def getAuthorizationCode(clientId: ClientId): IO[AuthorizationCode] = {
   Deferred[IO, AuthorizationCode].flatMap { deferredAuthCode =>
-    BlazeServerBuilder[IO](global)
-      .bindHttp(port = 0)
-      .withHttpApp { 
-        object CodeParam extends QueryParamDecoderMatcher[String]("code")
-        HttpRoutes.of[IO] {
-          case GET -> Root / "exchange_token" :? CodeParam(code) =>
-            deferredAuthCode.complete(AuthorizationCode(code)).as(Response(Status.Ok))
-        }.orNotFound
-      }
-      .stream.flatMap { server =>
-        val port = server.address.getPort
-        Stream.eval(requestAuthCode(blocker, clientId, port) *> deferredAuthCode.get)
-      }.compile.lastOrError
+    Dispatcher[IO].use { dispatcher =>
+      BlazeServerBuilder[IO](global, dispatcher)
+        .bindHttp(port = 0)
+        .withHttpApp { 
+          object CodeParam extends QueryParamDecoderMatcher[String]("code")
+          HttpRoutes.of[IO] {
+            case GET -> Root / "exchange_token" :? CodeParam(code) =>
+              deferredAuthCode.complete(AuthorizationCode(code)).as(Response(Status.Ok))
+          }.orNotFound
+        }
+        .stream.flatMap { server =>
+          val port = server.address.getPort
+          Stream.eval(requestAuthCode(clientId, port) *> deferredAuthCode.get)
+        }.compile.lastOrError
+    }
   }
 }
 ```
@@ -53,15 +55,15 @@ We first create a `Deferred[IO, AuthorizationCode]`, which will eventually be co
 Opening a browser is accomplished via the `open` utility:
 
 ```scala
-def requestAuthCode(blocker: Blocker, clientId: ClientId, localPort: Int): IO[Unit] = {
-  blocker.delay[IO, Unit] {
+def requestAuthCode(clientId: ClientId, localPort: Int): IO[Unit] = {
+  IO.blocking {
     import scala.sys.process._
     s"open http://www.strava.com/oauth/authorize?client_id=${clientId}&response_type=code&redirect_uri=http://localhost:${localPort}/exchange_token&approval_prompt=force&scope=read,activity:read".!
   }
 }
 ```
 
-Here we've used `scala.sys.process` to shell out to `open` but for more complicated interaction with processes, check out the [prox](https://vigoo.github.io/prox/) library. Because `scala.sys.process` blocks for the process to complete, we wrap its execution with `blocker.delay` to ensure the blocking does not occur on our main compute pool. (Note: in the forthcoming cats-effect 3, `Blocker` is gone and the equivalent is `IO.blocking { s"open http://...".! }`).
+Here we've used `scala.sys.process` to shell out to `open` but for more complicated interaction with processes, check out the [prox](https://vigoo.github.io/prox/) library. Because `scala.sys.process` blocks for the process to complete, we wrap its execution with `IO.blocking` to ensure the blocking does not occur on our main compute pool.
 
 Alright, now that we have an authorization code, we can fetch a bearer token:
 
@@ -83,8 +85,8 @@ This is straightforward usage of the http4s client API, though it relies on the 
 Putting these pieces together gives us the overall authentication workflow:
 
 ```scala
-def getBearerToken(blocker: Blocker, client: Client[IO], clientId: ClientId, clientSecret: ClientSecret): IO[BearerToken] =
-  getAuthorizationCode(blocker, clientId).flatMap(fetchBearerToken(client, clientId, clientSecret, _))
+def getBearerToken(client: Client[IO], clientId: ClientId, clientSecret: ClientSecret): IO[BearerToken] =
+  getAuthorizationCode(clientId).flatMap(fetchBearerToken(client, clientId, clientSecret, _))
 ```
 
 # Fetching Activities
@@ -126,11 +128,11 @@ This application needs simple local storage for the activities list. Since we ca
 ```scala
 private val path = Paths.get("activities.json")
 
-def writeActivitiesJson(blocker: Blocker, activities: Vector[Json])(implicit cs: ContextShift[IO]): IO[Unit] = {
+def writeActivitiesJson(activities: Vector[Json]): IO[Unit] = {
   val asString = Json.fromValues(activities).spaces2
   Stream.emit(asString)
     .through(text.utf8Encode)
-    .through(file.writeAll[IO](path, blocker, flags = List(
+    .through(Files[IO].writeAll(path, flags = List(
       StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING
     ))).compile.drain
 }
@@ -147,15 +149,12 @@ object FetchActivities extends IOApp with Http4sClientDsl[IO] {
       val clientId = ClientId(args.head)
       val clientSecret = ClientSecret(args.tail.head)
       val yearToFetch = Year.of(args.tail.tail.head.toInt)
-      Blocker[IO].use { blocker =>
-        BlazeClientBuilder[IO](global).resource.use { client =>
-          getBearerToken(blocker, client, clientId, clientSecret).flatMap { bearerToken =>
-            fetchActivitiesForYearJson(client, bearerToken, yearToFetch)
-              .compile.toVector
-              .flatTap(activities => IO(println(s"Fetched ${activities.size} activities")))
-              .flatMap(ActivityStorage.writeActivitiesJson(blocker, _))
-          }
-        }
+      val client = JavaNetClientBuilder[IO].create
+      getBearerToken(client, clientId, clientSecret).flatMap { bearerToken =>
+        fetchActivitiesForYearJson(client, bearerToken, yearToFetch)
+          .compile.toVector
+          .flatTap(activities => IO(println(s"Fetched ${activities.size} activities")))
+          .flatMap(ActivityStorage.writeActivitiesJson)
       }.as(ExitCode.Success)
     }
   }
@@ -166,7 +165,7 @@ This application uses the `fetchActivitiesForYearJson` method, which is implemen
 
 There's no validation or error handling of the command line arguments -- for a production grade application, we could use the [Decline](https://github.com/bkirwi/decline) library.
 
-Take note of the way the global resources, the `Blocker` and `Client[IO]` are instantiated in `run` as `cats.effect.Resource[IO, *]` values and then used (via `.use(r => ...)`), ensuring cleanup.
+We're using `JavaNetClientBuilder` to create a `Client[IO]` because as of the pubilcation date of this article, that's the only `Client[F]` implementation available for cats-effect 3. Additional client implementations will be available shortly (e.g. blaze, ember, async-http-client, netty).
 
 # Processing Activities
 
@@ -175,8 +174,8 @@ The processing application is much simpler. We need to read & decode the stored 
 Let's start with reading & decoding:
 
 ```scala
-def readActivities(blocker: Blocker)(implicit cs: ContextShift[IO]): IO[Vector[Activity]] =
-  file.readAll[IO](path, blocker, 4096).through(text.utf8Decode)
+def readActivities: IO[Vector[Activity]] =
+  Files[IO].readAll(path, 4096).through(text.utf8Decode)
     .compile.string
     .flatMap { str =>
       parse(str).flatMap(_.as[Vector[Activity]]) match {
@@ -230,12 +229,8 @@ We sort the activities so the longest activity is first and the shortest activit
 Hence, the full processing application is:
 
 ```scala
-object ProcessActivities extends IOApp {
-  def run(args: List[String]): IO[ExitCode] = {
-    Blocker[IO].use { blocker =>
-      ActivityStorage.readActivities(blocker).flatMap(summarizeActivities)
-    }.as(ExitCode.Success)
-  }
+object ProcessActivities extends IOApp.Simple {
+  def run: IO[Unit] = ActivityStorage.readActivities.flatMap(summarizeActivities)
 
   def totalMiles(activities: Vector[Activity]): String =
     f"${metersToMiles(activities.foldLeft(0.0d)(_ + _.distance))}%.2f mi"
@@ -283,7 +278,5 @@ object ProcessActivities extends IOApp {
 Success! We accomplished our goal with a small amount of code.
 
 Most of the complexity in this project was in the OAuth exchange. I'd love to see an OAuth2 http4s library that simplifies this kind of stuff.
-
-We used cats-effect 2 for this project since http4s is not yet available for cats-effect 3. Much of the code cruft (e.g. `Blocker` and `ContextShift[IO]`) is gone in cats-effect 3.
 
 By structuring the project as two applications, we were able to experiment with the data set in the REPL and iterate quickly on our processing logic. I find this style of "small data science" very effective and very applicable. No need for Spark or worksheets when you have small data sets and powerful libraries.

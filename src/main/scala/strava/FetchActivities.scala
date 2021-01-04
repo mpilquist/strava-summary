@@ -1,7 +1,7 @@
 package strava
 
 import cats.effect._
-import cats.effect.concurrent.Deferred
+import cats.effect.std.Dispatcher
 import cats.implicits._
 
 import fs2.{Chunk, Stream}
@@ -10,7 +10,6 @@ import io.circe.Json
 
 import org.http4s._
 import org.http4s.circe._
-import org.http4s.client.blaze._
 import org.http4s.client._
 import org.http4s.client.dsl.Http4sClientDsl
 import org.http4s.dsl.io._
@@ -30,43 +29,42 @@ object FetchActivities extends IOApp with Http4sClientDsl[IO] {
       val clientId = ClientId(args.head)
       val clientSecret = ClientSecret(args.tail.head)
       val yearToFetch = Year.of(args.tail.tail.head.toInt)
-      Blocker[IO].use { blocker =>
-        BlazeClientBuilder[IO](global).resource.use { client =>
-          getBearerToken(blocker, client, clientId, clientSecret).flatMap { bearerToken =>
-            fetchActivitiesForYearJson(client, bearerToken, yearToFetch)
-              .compile.toVector
-              .flatTap(activities => IO(println(s"Fetched ${activities.size} activities")))
-              .flatMap(ActivityStorage.writeActivitiesJson(blocker, _))
-          }
-        }
+      val client = JavaNetClientBuilder[IO].create
+      getBearerToken(client, clientId, clientSecret).flatMap { bearerToken =>
+        fetchActivitiesForYearJson(client, bearerToken, yearToFetch)
+          .compile.toVector
+          .flatTap(activities => IO(println(s"Fetched ${activities.size} activities")))
+          .flatMap(ActivityStorage.writeActivitiesJson)
       }.as(ExitCode.Success)
     }
   }
 
-  def getBearerToken(blocker: Blocker, client: Client[IO], clientId: ClientId, clientSecret: ClientSecret): IO[BearerToken] = {
-    getAuthorizationCode(blocker, clientId).flatMap(fetchBearerToken(client, clientId, clientSecret, _))
+  def getBearerToken(client: Client[IO], clientId: ClientId, clientSecret: ClientSecret): IO[BearerToken] = {
+    getAuthorizationCode(clientId).flatMap(fetchBearerToken(client, clientId, clientSecret, _))
   }
 
-  def getAuthorizationCode(blocker: Blocker, clientId: ClientId): IO[AuthorizationCode] = {
+  def getAuthorizationCode(clientId: ClientId): IO[AuthorizationCode] = {
     Deferred[IO, AuthorizationCode].flatMap { deferredAuthCode =>
-      BlazeServerBuilder[IO](global)
-        .bindHttp(port = 0)
-        .withHttpApp { 
-          object CodeParam extends QueryParamDecoderMatcher[String]("code")
-          HttpRoutes.of[IO] {
-            case GET -> Root / "exchange_token" :? CodeParam(code) =>
-              deferredAuthCode.complete(AuthorizationCode(code)).as(Response(Status.Ok))
-          }.orNotFound
-        }
-        .stream.flatMap { server =>
-          val port = server.address.getPort
-          Stream.eval(requestAuthCode(blocker, clientId, port) *> deferredAuthCode.get)
-        }.compile.lastOrError
+      Dispatcher[IO].use { dispatcher =>
+        BlazeServerBuilder[IO](global, dispatcher)
+          .bindHttp(port = 0)
+          .withHttpApp { 
+            object CodeParam extends QueryParamDecoderMatcher[String]("code")
+            HttpRoutes.of[IO] {
+              case GET -> Root / "exchange_token" :? CodeParam(code) =>
+                deferredAuthCode.complete(AuthorizationCode(code)).as(Response(Status.Ok))
+            }.orNotFound
+          }
+          .stream.flatMap { server =>
+            val port = server.address.getPort
+            Stream.eval(requestAuthCode(clientId, port) *> deferredAuthCode.get)
+          }.compile.lastOrError
+      }
     }
   }
 
-  def requestAuthCode(blocker: Blocker, clientId: ClientId, localPort: Int): IO[Unit] = {
-    blocker.delay[IO, Unit] {
+  def requestAuthCode(clientId: ClientId, localPort: Int): IO[Unit] = {
+    IO.blocking {
       import scala.sys.process._
       s"open http://www.strava.com/oauth/authorize?client_id=${clientId}&response_type=code&redirect_uri=http://localhost:${localPort}/exchange_token&approval_prompt=force&scope=read,activity:read".!
     }

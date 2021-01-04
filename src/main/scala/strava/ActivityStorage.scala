@@ -1,8 +1,8 @@
 package strava
 
-import cats.effect.{Blocker, ContextShift, IO}
+import cats.effect.IO
 import fs2.{Stream, text}
-import fs2.io.file
+import fs2.io.file.Files
 
 import io.circe.Json
 import io.circe.parser._
@@ -13,17 +13,17 @@ object ActivityStorage {
 
   private val path = Paths.get("activities.json")
 
-  def writeActivitiesJson(blocker: Blocker, activities: Vector[Json])(implicit cs: ContextShift[IO]): IO[Unit] = {
+  def writeActivitiesJson(activities: Vector[Json]): IO[Unit] = {
     val asString = Json.fromValues(activities).spaces2
     Stream.emit(asString)
       .through(text.utf8Encode)
-      .through(file.writeAll[IO](path, blocker, flags = List(
+      .through(Files[IO].writeAll(path, flags = List(
         StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING
       ))).compile.drain
   }
 
-  def readActivities(blocker: Blocker)(implicit cs: ContextShift[IO]): IO[Vector[Activity]] =
-    file.readAll[IO](path, blocker, 4096).through(text.utf8Decode)
+  def readActivities: IO[Vector[Activity]] =
+    Files[IO].readAll(path, 4096).through(text.utf8Decode)
       .compile.string
       .flatMap { str =>
         parse(str).flatMap(_.as[Vector[Activity]]) match {

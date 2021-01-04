@@ -1,13 +1,9 @@
 package strava
 
-import cats.effect.{Blocker, ExitCode, IO, IOApp}
+import cats.effect.{IO, IOApp}
 
-object ProcessActivities extends IOApp {
-  def run(args: List[String]): IO[ExitCode] = {
-    Blocker[IO].use { blocker =>
-      ActivityStorage.readActivities(blocker).flatMap(summarizeActivities)
-    }.as(ExitCode.Success)
-  }
+object ProcessActivities extends IOApp.Simple {
+  def run: IO[Unit] = ActivityStorage.readActivities.flatMap(summarizeActivities)
 
   def totalMiles(activities: Vector[Activity]): String =
     f"${metersToMiles(activities.foldLeft(0.0d)(_ + _.distance))}%.2f mi"
